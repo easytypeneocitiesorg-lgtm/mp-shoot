@@ -2,116 +2,124 @@
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Multiplayer Shooter</title>
+<title>Firebase Multiplayer Shooter</title>
 <style>
 body { margin:0; background:#111; color:#eee; font-family:sans-serif; text-align:center; }
 #ui { margin:10px; }
 canvas { background:#0a0a0f; border:1px solid #222; display:block; margin:10px auto; }
-input,button { margin:3px; }
 </style>
 </head>
 <body>
 <div id="ui">
-  <button id="createBtn">Create Room</button>
-  <input id="codeInput" placeholder="Room code" maxlength="4" style="width:60px" />
-  <button id="joinBtn">Join</button>
-  <div id="status"></div>
+  <div id="status">Connecting...</div>
 </div>
 
 <canvas id="game" width="640" height="480"></canvas>
 
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 <script>
-const ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/api/server");
+// --- Firebase config ---
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT_ID.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+// --- Game setup ---
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
-const codeInput = document.getElementById("codeInput");
 
-let id = null, room = null;
-let players = {}; // id → {x,y,dir,hp}
+let id = Math.random().toString(36).slice(2,9);
+let x=320, y=240, dir=0, hp=100;
+let players = {};
 let bullets = [];
-
 let keys = {};
+
 document.addEventListener("keydown", e => keys[e.key] = true);
 document.addEventListener("keyup", e => keys[e.key] = false);
-canvas.addEventListener("click", e => shoot(e));
+canvas.addEventListener("click", shoot);
 
-let x = 320, y = 240, dir = 0, hp = 100;
+// --- Database paths ---
+const lobbyRef = db.ref('lobby');
+const playersRef = lobbyRef.child('players');
+const bulletsRef = lobbyRef.child('bullets');
 
-function shoot(e) {
+// --- Add self to lobby ---
+playersRef.child(id).set({x, y, dir, hp});
+playersRef.child(id).onDisconnect().remove(); // remove on leave
+
+// --- Listen for other players ---
+playersRef.on('value', snapshot => {
+  players = snapshot.val() || {};
+});
+
+bulletsRef.on('child_added', snapshot => {
+  bullets.push(snapshot.val());
+  // remove bullet after 2 seconds
+  setTimeout(()=>snapshot.ref.remove(), 2000);
+});
+
+// --- Shoot function ---
+function shoot(e){
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   dir = Math.atan2(my - y, mx - x);
   const b = {x, y, dx: Math.cos(dir)*300, dy: Math.sin(dir)*300};
-  bullets.push(b);
-  send({t:"bullet", b});
+  bulletsRef.push(b);
 }
 
-function send(obj){ if(ws.readyState===1) ws.send(JSON.stringify(obj)); }
-
-document.getElementById("createBtn").onclick = () => send({t:"create"});
-document.getElementById("joinBtn").onclick = () => {
-  const code = codeInput.value.trim();
-  if (code) send({t:"join", code});
-};
-
-ws.onmessage = (ev) => {
-  const d = JSON.parse(ev.data);
-
-  if(d.t === "room") {
-    // Host created room
-    room = d.code;
-    id = d.id;
-    statusEl.textContent = "Room created! Share the code with a friend.";
-    setTimeout(() => codeInput.value = room, 50); // ensure input updates
-  } 
-  else if(d.t === "joined") {
-    room = d.code;
-    id = d.id;
-    statusEl.textContent = "Joined room: " + room;
-  } 
-  else if(d.t === "state" || d.t === "bullet" || d.t === "join" || d.t === "leave") {
-    handle(d);
-  } 
-  else if(d.t === "error") {
-    statusEl.textContent = "Error: " + d.msg;
-  }
-};
-
-function handle(d) {
-  if(d.t === "state") players[d.id] = d;
-  if(d.t === "bullet") bullets.push(d.b);
-  if(d.t === "leave") delete players[d.id];
+// --- Send local position to Firebase ---
+function sendState(){
+  playersRef.child(id).set({x, y, dir, hp});
 }
 
+// --- Game loop ---
 let last = performance.now();
 function loop(now){
   const dt = (now - last)/1000; last = now;
   const speed = 150;
+
   if(keys["w"]) y -= speed*dt;
   if(keys["s"]) y += speed*dt;
   if(keys["a"]) x -= speed*dt;
   if(keys["d"]) x += speed*dt;
-  if(room && id) send({t:"state", x, y, dir, hp});
 
+  sendState();
+
+  // update bullets
   bullets.forEach(b => { b.x += b.dx*dt; b.y += b.dy*dt; });
-  bullets = bullets.filter(b => b.x>0&&b.x<canvas.width&&b.y>0&&b.y<canvas.height);
+  bullets = bullets.filter(b => b.x>0 && b.x<canvas.width && b.y>0 && b.y<canvas.height);
 
   draw();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
+// --- Draw function ---
 function draw(){
   ctx.fillStyle="#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle="#0ff"; ctx.fillRect(x-10,y-10,20,20);
+
+  // draw other players
   for(const pid in players){
     const p = players[pid];
-    ctx.fillStyle="#f77"; ctx.fillRect(p.x-10,p.y-10,20,20);
+    ctx.fillStyle = pid===id?"#0ff":"#f77";
+    ctx.fillRect(p.x-10,p.y-10,20,20);
   }
+
+  // draw bullets
   ctx.fillStyle="#fff";
   bullets.forEach(b => ctx.fillRect(b.x-3,b.y-3,6,6));
+
+  statusEl.textContent = `Players: ${Object.keys(players).length}`;
 }
 </script>
 </body>
