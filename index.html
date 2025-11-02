@@ -40,6 +40,7 @@ const statusEl = document.getElementById("status");
 
 let id = Math.random().toString(36).slice(2,9);
 let x=320, y=240, dir=0, hp=100;
+let dead = false;
 let players = {};
 let bullets = [];
 let keys = {};
@@ -60,16 +61,20 @@ playersRef.child(id).onDisconnect().remove(); // remove on leave
 // --- Listen for other players ---
 playersRef.on('value', snapshot => {
   players = snapshot.val() || {};
+  // keep local hp if dead
+  if(dead && players[id]) players[id].hp = 0;
 });
 
 // --- Listen for new bullets ---
 bulletsRef.on('child_added', snapshot => {
-  bullets.push(snapshot.val());
-  setTimeout(()=>snapshot.ref.remove(), 2000);
+  const b = snapshot.val();
+  b.key = snapshot.key;
+  bullets.push(b);
 });
 
 // --- Shoot function ---
 function shoot(e){
+  if(dead) return;
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
@@ -89,37 +94,44 @@ function loop(now){
   const dt = (now - last)/1000; last = now;
   const speed = 150;
 
-  // --- Movement ---
-  if(keys["w"]) y -= speed*dt;
-  if(keys["s"]) y += speed*dt;
-  if(keys["a"]) x -= speed*dt;
-  if(keys["d"]) x += speed*dt;
+  if(!dead){
+    if(keys["w"]) y -= speed*dt;
+    if(keys["s"]) y += speed*dt;
+    if(keys["a"]) x -= speed*dt;
+    if(keys["d"]) x += speed*dt;
+  }
 
   // --- Update bullets ---
-  bullets.forEach(b => {
+  bullets.forEach((b,i)=>{
     b.x += b.dx*dt;
     b.y += b.dy*dt;
 
-    // --- Check collision with players ---
-    for(const pid in players){
-      const p = players[pid];
-      if(pid === b.owner) continue; // don't hit yourself
-      if(p.hp <= 0) continue;
-      if(b.x > p.x-10 && b.x < p.x+10 && b.y > p.y-10 && b.y < p.y+10){
-        // hit detected
-        playersRef.child(pid).update({hp: Math.max(p.hp - 20, 0)});
-        b.hit = true;
+    // Only owner applies damage
+    if(b.owner===id){
+      for(const pid in players){
+        const p = players[pid];
+        if(pid===id || !p || p.hp<=0) continue;
+        if(b.x > p.x-10 && b.x < p.x+10 && b.y > p.y-10 && b.y < p.y+10){
+          const newHp = Math.max(p.hp-20,0);
+          playersRef.child(pid).update({hp:newHp});
+          bulletsRef.child(b.key).remove();
+        }
       }
     }
   });
 
-  bullets = bullets.filter(b => b.x>0 && b.x<canvas.width && b.y>0 && b.y<canvas.height && !b.hit);
+  // Remove bullets offscreen
+  bullets = bullets.filter(b => b.x>0 && b.x<canvas.width && b.y>0 && b.y<canvas.height);
 
   // --- Check if self died ---
-  if(hp <= 0){
-    x = Math.random()*canvas.width;
-    y = Math.random()*canvas.height;
-    hp = 100;
+  if(!dead && hp<=0){
+    dead=true;
+    x= -1000; y=-1000; // hide while dead
+    sendState();
+    setTimeout(()=>{
+      x=canvas.width/2; y=canvas.height/2; hp=100; dead=false;
+      sendState();
+    },3000);
   }
 
   sendState();
@@ -135,11 +147,11 @@ function draw(){
   // draw players
   for(const pid in players){
     const p = players[pid];
-    if(p.hp <= 0) continue;
+    if(!p || p.hp<=0) continue;
     ctx.fillStyle = pid===id?"#0ff":"#f77";
     ctx.fillRect(p.x-10,p.y-10,20,20);
 
-    // draw health bar
+    // health bar
     ctx.fillStyle="#0f0";
     ctx.fillRect(p.x-10,p.y-15,20*(p.hp/100),3);
   }
@@ -148,7 +160,7 @@ function draw(){
   ctx.fillStyle="#fff";
   bullets.forEach(b => ctx.fillRect(b.x-3,b.y-3,6,6));
 
-  statusEl.textContent = `Players: ${Object.keys(players).length} | Your HP: ${players[id]?players[id].hp:hp}`;
+  statusEl.textContent = `Players: ${Object.keys(players).length} | Your HP: ${players[id]?players[id].hp:hp} ${dead?'(Dead)': ''}`;
 }
 </script>
 </body>
