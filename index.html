@@ -63,7 +63,6 @@ playersRef.on('value', snapshot => {
 
 bulletsRef.on('child_added', snapshot => {
   bullets.push(snapshot.val());
-  // remove bullet after 2 seconds
   setTimeout(()=>snapshot.ref.remove(), 2000);
 });
 
@@ -108,14 +107,12 @@ requestAnimationFrame(loop);
 function draw(){
   ctx.fillStyle="#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
 
-  // draw other players
   for(const pid in players){
     const p = players[pid];
     ctx.fillStyle = pid===id?"#0ff":"#f77";
     ctx.fillRect(p.x-10,p.y-10,20,20);
   }
 
-  // draw bullets
   ctx.fillStyle="#fff";
   bullets.forEach(b => ctx.fillRect(b.x-3,b.y-3,6,6));
 
