@@ -1,387 +1,103 @@
-<!-- Single-file client. Put at /index.html -->
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Tiny P2P Shooter (WebRTC)</title>
+<title>Tiny Multiplayer Shooter</title>
 <style>
-  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:#111; color:#eee; }
-  #ui { position:fixed; left:8px; top:8px; z-index:20; background:rgba(0,0,0,.5); padding:10px; border-radius:6px; }
-  canvas{ display:block; margin:0 auto; background:#0a0a0f; border:1px solid #222; }
-  input,button { margin:4px 2px; }
+  body { margin:0; background:#111; color:#eee; font-family:sans-serif; text-align:center; }
+  #ui { margin:10px; }
+  canvas { background:#0a0a0f; border:1px solid #222; display:block; margin:10px auto; }
 </style>
 </head>
 <body>
 <div id="ui">
-  <div>
-    <button id="createBtn">Create Room</button>
-    <button id="joinBtn">Join Room</button>
-  </div>
-  <div>
-    Room: <input id="roomInput" placeholder="4 digit" style="width:70px" maxlength="4" />
-    <button id="enterBtn">Enter</button>
-  </div>
-  <div>
-    Your name: <input id="name" placeholder="player" style="width:90px" />
-  </div>
-  <div id="status">idle</div>
-  <div id="players"></div>
-  <div style="margin-top:6px">Controls: WASD to move, click to shoot</div>
+  <button id="createBtn">Create Room</button>
+  <input id="codeInput" placeholder="Room code" maxlength="4" style="width:60px" />
+  <button id="joinBtn">Join</button>
+  <div id="status"></div>
 </div>
 
-<canvas id="c" width="720" height="480"></canvas>
+<canvas id="game" width="640" height="480"></canvas>
 
 <script>
-/*
- Very small P2P shooter using WebRTC DataChannel for real-time state sync.
- Room signaling via /api/signaling (see server code).
- Works best for 2 players; might work with more but it's minimal.
-*/
-
-const SIGNAL_URL = "/api/signaling";
-const canvas = document.getElementById("c");
+const ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/api/server");
+const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
-const playersEl = document.getElementById("players");
 
-let pc, dc;
-let isHost = false;
-let roomCode = null;
-let localId = Math.random().toString(36).slice(2,8);
-let nameInput = document.getElementById("name");
-
-let local = { x: 100, y: 100, dir: 0, id: localId, hp: 100, name: "You" };
-let peers = {}; // id -> {x,y,dir,hp,name,last}
-let bullets = []; // local bullets
-let remoteBullets = []; // bullets reported by peers
-
-// Simple physics
-const speed = 160; // px/sec
-const bulletSpeed = 380;
+let id = null, room = null;
+let players = {}; // id → {x,y,dir,hp}
+let bullets = [];
 
 let keys = {};
-window.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
-window.addEventListener("keyup", e => keys[e.key.toLowerCase()] = false);
+document.addEventListener("keydown", e => keys[e.key] = true);
+document.addEventListener("keyup", e => keys[e.key] = false);
+canvas.addEventListener("click", e => shoot(e));
 
-canvas.addEventListener("click", e => {
+let x = 320, y = 240, dir = 0, hp = 100;
+
+function shoot(e) {
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
-  local.dir = Math.atan2(my - local.y, mx - local.x);
-  shoot(local.x, local.y, local.dir);
-});
-
-function shoot(x,y,dir) {
-  const id = Math.random().toString(36).slice(2,9);
-  bullets.push({id, x, y, dx: Math.cos(dir)*bulletSpeed, dy: Math.sin(dir)*bulletSpeed, owner: local.id});
-  send({t:'bullet', b:{id,x,y,dx:Math.cos(dir)*bulletSpeed,dy:Math.sin(dir)*bulletSpeed,owner: local.id}});
+  dir = Math.atan2(my - y, mx - x);
+  const b = {x, y, dx: Math.cos(dir)*300, dy: Math.sin(dir)*300};
+  bullets.push(b);
+  send({t:"bullet", b});
 }
 
-function send(obj) {
-  if (dc && dc.readyState === "open") {
-    dc.send(JSON.stringify(obj));
-  }
-  // also POST a small heartbeat to signaling so joiner sees host alive (not needed but handy)
-}
+function send(obj){ if(ws.readyState===1) ws.send(JSON.stringify(obj)); }
 
-// --- Signaling helpers (simple poll/post) ---
-async function signalingPost(payload) {
-  await fetch(SIGNAL_URL, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(payload)
-  }).then(r => r.json()).catch(console.warn);
-}
-
-async function signalingGet() {
-  const res = await fetch(SIGNAL_URL + "?room=" + encodeURIComponent(roomCode)).then(r=>r.json()).catch(e=>({messages:[]}));
-  return res.messages || [];
-}
-
-// --- WebRTC setup ---
-async function makePeerConnection() {
-  pc = new RTCPeerConnection();
-  pc.onicecandidate = e => {
-    if (e.candidate) {
-      signalingPost({room:roomCode, from:localId, type:'ice', data:e.candidate});
-    }
-  };
-  pc.ondatachannel = ev => {
-    dc = ev.channel;
-    setupDataChannel();
-  };
-}
-
-function setupDataChannel() {
-  dc.onopen = () => {
-    status("Data channel open");
-    // announce presence
-    send({t:'hello', id: local.id, name: nameInput.value || local.id});
-  };
-  dc.onmessage = ev => {
-    try {
-      const msg = JSON.parse(ev.data);
-      handlePeerMessage(msg);
-    } catch (e) {}
-  };
-  dc.onclose = () => status("Data channel closed");
-}
-
-// Handle messages received over datachannel
-function handlePeerMessage(msg) {
-  if (msg.t === 'state') {
-    peers[msg.id] = { x: msg.x, y: msg.y, dir: msg.dir, hp: msg.hp, name: msg.name, last: Date.now() };
-  } else if (msg.t === 'hello') {
-    peers[msg.id] = { x:100, y:100, dir:0, hp:100, name: msg.name, last:Date.now() };
-  } else if (msg.t === 'bullet') {
-    remoteBullets.push(msg.b);
-  } else if (msg.t === 'chat') {
-    console.log("chat:", msg.text);
-  }
-}
-
-// Poll signaling for offers/answers/ice
-let pollTimer = null;
-async function startPolling() {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
-    if (!roomCode) return;
-    const msgs = await signalingGet();
-    for (const m of msgs) {
-      if (m.from === localId) continue;
-      // handle sdp/ice types in data
-      if (m.type === 'offer' && !isHost) {
-        // joiner receives host offer
-        await makePeerConnection();
-        const offer = m.data;
-        await pc.setRemoteDescription(offer);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        // send answer back
-        await signalingPost({ room: roomCode, from: localId, to: m.from, type: 'answer', data: answer });
-      } else if (m.type === 'answer' && isHost) {
-        await pc.setRemoteDescription(m.data);
-      } else if (m.type === 'ice' && m.from !== localId) {
-        try { await pc.addIceCandidate(m.data); } catch (e) {}
-      }
-    }
-  }, 900);
-}
-
-// UI handlers
-document.getElementById("createBtn").onclick = async () => {
-  isHost = true;
-  roomCode = (""+Math.floor(1000 + Math.random()*9000));
-  document.getElementById("roomInput").value = roomCode;
-  status("Created room " + roomCode + " (you are host)");
-  await hostCreateOffer();
-  startPolling();
+document.getElementById("createBtn").onclick = () => send({t:"create"});
+document.getElementById("joinBtn").onclick = () => {
+  const code = document.getElementById("codeInput").value.trim();
+  if (code) send({t:"join", code});
 };
 
-document.getElementById("joinBtn").onclick = async () => {
-  isHost = false;
-  status("Enter room code then click Enter");
+ws.onmessage = (ev) => {
+  const d = JSON.parse(ev.data);
+  if (d.t === "room" || d.t === "joined") {
+    room = d.code; id = d.id;
+    statusEl.textContent = "Room " + room + " | You: " + id;
+  } else if (d.t === "state" || d.t === "bullet" || d.t === "join" || d.t === "leave") {
+    handle(d);
+  } else if (d.t === "error") statusEl.textContent = d.msg;
 };
 
-document.getElementById("enterBtn").onclick = async () => {
-  const val = document.getElementById("roomInput").value.trim();
-  if (!val) return;
-  roomCode = val;
-  if (!isHost) {
-    status("Joining " + roomCode + " ...");
-    startPolling();
-    // joiner will be waiting for host offer in polling loop; once sees offer, it will answer
-    // To speed things up we also poll signaling for an offer immediately:
-    const msgs = await signalingGet();
-    for (const m of msgs) {
-      if (m.type === 'offer') {
-        // handle immediately in poller next tick
-      }
-    }
-  } else {
-    status("Room set to " + roomCode);
-  }
-};
-
-// Host: create offer and post to signaling
-async function hostCreateOffer() {
-  isHost = true;
-  await makePeerConnection();
-  dc = pc.createDataChannel("game");
-  setupDataChannel();
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await signalingPost({ room: roomCode, from: localId, type: 'offer', data: pc.localDescription });
-  status("Offer posted, waiting for answer...");
+function handle(d) {
+  if (d.t === "state") players[d.id] = d;
+  if (d.t === "bullet") bullets.push(d.b);
+  if (d.t === "leave") delete players[d.id];
 }
 
-// Periodically send local state to peers via datachannel
-setInterval(() => {
-  if (dc && dc.readyState === "open") {
-    const msg = { t:'state', id: local.id, x: local.x, y: local.y, dir: local.dir, hp: local.hp, name: nameInput.value || local.id };
-    dc.send(JSON.stringify(msg));
-    // also send bullets created locally
-    while (bullets.length && bullets.length > 0) {
-      // send bullets as they're created - but to limit bandwidth we can send only new ones (here we just send all for simplicity)
-      // send bullet events
-      // (we also keep them locally)
-      break;
-    }
-  }
-}, 100);
-
-// game loop
 let last = performance.now();
-function loop(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-  // move local
-  let mvx = 0, mvy = 0;
-  if (keys['w']) mvy -= 1;
-  if (keys['s']) mvy += 1;
-  if (keys['a']) mvx -= 1;
-  if (keys['d']) mvx += 1;
-  const len = Math.hypot(mvx, mvy) || 1;
-  local.x += (mvx/len) * speed * dt;
-  local.y += (mvy/len) * speed * dt;
-  // clamp
-  local.x = Math.max(10, Math.min(canvas.width-10, local.x));
-  local.y = Math.max(10, Math.min(canvas.height-10, local.y));
+function loop(now){
+  const dt = (now - last)/1000; last = now;
+  const speed = 150;
+  if (keys["w"]) y -= speed*dt;
+  if (keys["s"]) y += speed*dt;
+  if (keys["a"]) x -= speed*dt;
+  if (keys["d"]) x += speed*dt;
+  if (room && id) send({t:"state", x, y, dir, hp});
 
-  // update bullets
-  for (let i = bullets.length-1; i>=0; i--) {
-    const b = bullets[i];
-    b.x += b.dx * dt;
-    b.y += b.dy * dt;
-    if (b.x < -10 || b.x > canvas.width+10 || b.y < -10 || b.y > canvas.height+10) bullets.splice(i,1);
-    // hit test against peers
-    for (const pid in peers) {
-      const p = peers[pid];
-      if (!p) continue;
-      const d = Math.hypot(b.x - p.x, b.y - p.y);
-      if (d < 14 && b.owner === local.id) {
-        // local bullet hit remote player - notify peer (we don't have authority, so just pretend)
-        // In a real game you'd decide authority. Here we just reduce hp locally for demo.
-        p.hp = Math.max(0, (p.hp||100) - 20);
-        bullets.splice(i,1);
-        break;
-      }
-    }
-  }
-
-  // update remote bullets
-  for (let i = remoteBullets.length-1; i>=0; i--) {
-    const b = remoteBullets[i];
-    b.x += (b.dx||0) * dt;
-    b.y += (b.dy||0) * dt;
-    if (b.x < -10 || b.x > canvas.width+10 || b.y < -10 || b.y > canvas.height+10) remoteBullets.splice(i,1);
-
-    // test against local
-    const d = Math.hypot(b.x - local.x, b.y - local.y);
-    if (d < 14 && b.owner !== local.id) {
-      local.hp = Math.max(0, local.hp - 20);
-      remoteBullets.splice(i,1);
-    }
-  }
-
-  // cleanup stale peers
-  for (const pid in peers) {
-    if (Date.now() - peers[pid].last > 5000) delete peers[pid];
-  }
+  bullets.forEach(b => { b.x += b.dx*dt; b.y += b.dy*dt; });
+  bullets = bullets.filter(b => b.x>0&&b.x<canvas.width&&b.y>0&&b.y<canvas.height);
 
   draw();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
-function draw() {
-  ctx.fillStyle = "#06060a";
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-
-  // draw peers
-  for (const pid in peers) {
-    const p = peers[pid];
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    ctx.rotate(p.dir || 0);
-    // body
-    ctx.fillStyle = "#ff7";
-    ctx.fillRect(-12,-12,24,24);
-    ctx.fillStyle = "#000";
-    ctx.fillRect(8,-4,12,8); // gun
-    ctx.restore();
-
-    ctx.fillStyle = "#fff";
-    ctx.fillText((p.name||pid) + " " + (p.hp||100), p.x-16, p.y-18);
+function draw(){
+  ctx.fillStyle="#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="#0ff"; ctx.fillRect(x-10,y-10,20,20);
+  for(const pid in players){
+    const p=players[pid];
+    ctx.fillStyle="#f77"; ctx.fillRect(p.x-10,p.y-10,20,20);
   }
-
-  // draw local
-  ctx.save();
-  ctx.translate(local.x, local.y);
-  ctx.rotate(local.dir || 0);
-  ctx.fillStyle = "#7ff";
-  ctx.fillRect(-12,-12,24,24);
-  ctx.fillStyle = "#000";
-  ctx.fillRect(8,-4,12,8);
-  ctx.restore();
-  ctx.fillStyle = "#fff";
-  ctx.fillText((nameInput.value || "You") + " " + local.hp, local.x-16, local.y-18);
-
-  // bullets
-  ctx.fillStyle = "#f55";
-  for (const b of bullets) ctx.fillRect(b.x-3,b.y-3,6,6);
-  ctx.fillStyle = "#faa";
-  for (const b of remoteBullets) ctx.fillRect(b.x-3,b.y-3,6,6);
-
-  // UI players list
-  let html = `<b>Players:</b><br>${nameInput.value || local.id} (${local.hp})<br>`;
-  for (const pid in peers) {
-    html += `${peers[pid].name||pid} (${peers[pid].hp||100})<br>`;
-  }
-  playersEl.innerHTML = html;
+  ctx.fillStyle="#fff";
+  bullets.forEach(b=>ctx.fillRect(b.x-3,b.y-3,6,6));
 }
-
-function status(t) { statusEl.innerText = t; }
-
-// Also accept signaling messages posted to server (poll loop will set remote description/ice)
-(async function pollSignalingLoop(){
-  // also poll server for manual SDP messages (for host waiting for answer etc.)
-  let lastCheck = Date.now();
-  setInterval(async () => {
-    if (!roomCode) return;
-    const msgs = await signalingGet();
-    for (const m of msgs) {
-      if (m.from === localId) continue;
-      if (m.type === 'answer' && isHost) {
-        if (pc && m.data) {
-          await pc.setRemoteDescription(m.data);
-          status("Connected (host)");
-        }
-      } else if (m.type === 'offer' && !isHost) {
-        // handled in startPolling but just in case
-      } else if (m.type === 'ice') {
-        if (pc && m.data) {
-          try { await pc.addIceCandidate(m.data); } catch(e){}
-        }
-      }
-    }
-  }, 800);
-})();
-
-// When datachannel opens, wire sending bullets created locally in real-time
-(function hookBulletSend(){
-  const origShoot = shoot;
-  shoot = function(x,y,dir) {
-    origShoot(x,y,dir);
-    // send bullet over datachannel
-    if (dc && dc.readyState === "open") {
-      const lastBullet = bullets[bullets.length-1];
-      if (lastBullet) dc.send(JSON.stringify({t:'bullet', b:lastBullet}));
-    }
-  };
-})();
 </script>
 </body>
 </html>
