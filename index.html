@@ -27,7 +27,8 @@ const firebaseConfig = {
   projectId: "multiplayer-shooter-53747",
   storageBucket: "multiplayer-shooter-53747.firebasestorage.app",
   messagingSenderId: "719008624296",
-  appId: "1:719008624296:web:028f0e6ffa71ce718c1c9d"
+  appId: "1:719008624296:web:028f0e6ffa71ce718c1c9d",
+  measurementId: "G-ZXWW37JQ9X"
 };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
@@ -61,6 +62,7 @@ playersRef.on('value', snapshot => {
   players = snapshot.val() || {};
 });
 
+// --- Listen for new bullets ---
 bulletsRef.on('child_added', snapshot => {
   bullets.push(snapshot.val());
   setTimeout(()=>snapshot.ref.remove(), 2000);
@@ -72,11 +74,11 @@ function shoot(e){
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   dir = Math.atan2(my - y, mx - x);
-  const b = {x, y, dx: Math.cos(dir)*300, dy: Math.sin(dir)*300};
+  const b = {x, y, dx: Math.cos(dir)*300, dy: Math.sin(dir)*300, owner:id};
   bulletsRef.push(b);
 }
 
-// --- Send local position to Firebase ---
+// --- Send local position & health to Firebase ---
 function sendState(){
   playersRef.child(id).set({x, y, dir, hp});
 }
@@ -87,17 +89,40 @@ function loop(now){
   const dt = (now - last)/1000; last = now;
   const speed = 150;
 
+  // --- Movement ---
   if(keys["w"]) y -= speed*dt;
   if(keys["s"]) y += speed*dt;
   if(keys["a"]) x -= speed*dt;
   if(keys["d"]) x += speed*dt;
 
+  // --- Update bullets ---
+  bullets.forEach(b => {
+    b.x += b.dx*dt;
+    b.y += b.dy*dt;
+
+    // --- Check collision with players ---
+    for(const pid in players){
+      const p = players[pid];
+      if(pid === b.owner) continue; // don't hit yourself
+      if(p.hp <= 0) continue;
+      if(b.x > p.x-10 && b.x < p.x+10 && b.y > p.y-10 && b.y < p.y+10){
+        // hit detected
+        playersRef.child(pid).update({hp: Math.max(p.hp - 20, 0)});
+        b.hit = true;
+      }
+    }
+  });
+
+  bullets = bullets.filter(b => b.x>0 && b.x<canvas.width && b.y>0 && b.y<canvas.height && !b.hit);
+
+  // --- Check if self died ---
+  if(hp <= 0){
+    x = Math.random()*canvas.width;
+    y = Math.random()*canvas.height;
+    hp = 100;
+  }
+
   sendState();
-
-  // update bullets
-  bullets.forEach(b => { b.x += b.dx*dt; b.y += b.dy*dt; });
-  bullets = bullets.filter(b => b.x>0 && b.x<canvas.width && b.y>0 && b.y<canvas.height);
-
   draw();
   requestAnimationFrame(loop);
 }
@@ -107,16 +132,23 @@ requestAnimationFrame(loop);
 function draw(){
   ctx.fillStyle="#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
 
+  // draw players
   for(const pid in players){
     const p = players[pid];
+    if(p.hp <= 0) continue;
     ctx.fillStyle = pid===id?"#0ff":"#f77";
     ctx.fillRect(p.x-10,p.y-10,20,20);
+
+    // draw health bar
+    ctx.fillStyle="#0f0";
+    ctx.fillRect(p.x-10,p.y-15,20*(p.hp/100),3);
   }
 
+  // draw bullets
   ctx.fillStyle="#fff";
   bullets.forEach(b => ctx.fillRect(b.x-3,b.y-3,6,6));
 
-  statusEl.textContent = `Players: ${Object.keys(players).length}`;
+  statusEl.textContent = `Players: ${Object.keys(players).length} | Your HP: ${players[id]?players[id].hp:hp}`;
 }
 </script>
 </body>
