@@ -1,7 +1,4 @@
-// Very small WebSocket game server for Vercel
-// Keeps rooms + players in memory (no database).
-// Works for a few players per room.
-
+// Simple WebSocket game server for Vercel
 import { WebSocketServer } from "ws";
 
 const rooms = {}; // { code: { players: { id: ws }, state: { id: {...} } } }
@@ -34,12 +31,14 @@ export default function handler(req, res) {
     ws.on("message", (msg) => {
       try {
         const data = JSON.parse(msg.toString());
+
         if (data.t === "create") {
           roomCode = makeCode();
           rooms[roomCode] = { players: {}, state: {} };
           rooms[roomCode].players[playerId] = ws;
           ws.send(JSON.stringify({ t: "room", code: roomCode, id: playerId }));
-        } else if (data.t === "join") {
+        } 
+        else if (data.t === "join") {
           roomCode = data.code;
           if (!rooms[roomCode]) {
             ws.send(JSON.stringify({ t: "error", msg: "Room not found" }));
@@ -47,14 +46,15 @@ export default function handler(req, res) {
           }
           rooms[roomCode].players[playerId] = ws;
           ws.send(JSON.stringify({ t: "joined", code: roomCode, id: playerId }));
-          // notify others
           broadcast(roomCode, { t: "join", id: playerId }, playerId);
-        } else if (data.t === "state" && roomCode) {
+        } 
+        else if (data.t === "state" && roomCode) {
           const r = rooms[roomCode];
           if (!r) return;
           r.state[playerId] = data;
           broadcast(roomCode, { ...data, id: playerId }, playerId);
-        } else if (data.t === "bullet" && roomCode) {
+        } 
+        else if (data.t === "bullet" && roomCode) {
           broadcast(roomCode, { t: "bullet", id: playerId, b: data.b }, playerId);
         }
       } catch {}
