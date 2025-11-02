@@ -56,13 +56,27 @@ document.getElementById("joinBtn").onclick = () => {
 
 ws.onmessage = (ev) => {
   const d = JSON.parse(ev.data);
-  if (d.t === "room" || d.t === "joined") {
-    room = d.code; id = d.id;
-    statusEl.textContent = "Room " + room + " | You: " + id;
-  } else if (d.t === "state" || d.t === "bullet" || d.t === "join" || d.t === "leave") {
+  
+  if (d.t === "room") {
+    // Host created room
+    room = d.code;
+    id = d.id;
+    statusEl.textContent = "Room created! Code: " + room + " | You: " + id;
+  } 
+  else if (d.t === "joined") {
+    // Joiner successfully joined
+    room = d.code;
+    id = d.id;
+    statusEl.textContent = "Joined room: " + room + " | You: " + id;
+  } 
+  else if (d.t === "state" || d.t === "bullet" || d.t === "join" || d.t === "leave") {
     handle(d);
-  } else if (d.t === "error") statusEl.textContent = d.msg;
+  } 
+  else if (d.t === "error") {
+    statusEl.textContent = "Error: " + d.msg;
+  }
 };
+
 
 function handle(d) {
   if (d.t === "state") players[d.id] = d;
