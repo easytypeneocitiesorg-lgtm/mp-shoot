@@ -2,165 +2,83 @@
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Firebase Multiplayer Shooter</title>
+<title>Top-Down Shooter</title>
 <style>
 body { margin:0; background:#111; color:#eee; font-family:sans-serif; text-align:center; }
-#ui { margin:10px; }
 canvas { background:#0a0a0f; border:1px solid #222; display:block; margin:10px auto; }
 </style>
 </head>
 <body>
-<div id="ui">
-  <div id="status">Connecting...</div>
-</div>
-
 <canvas id="game" width="640" height="480"></canvas>
+<div id="status">Connecting...</div>
 
-<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 <script>
-// --- Firebase config ---
-const firebaseConfig = {
-  apiKey: "AIzaSyCkWxO6R8SBX2jdRdsk6jqOJvLS55eYw_0",
-  authDomain: "multiplayer-shooter-53747.firebaseapp.com",
-  databaseURL: "https://multiplayer-shooter-53747-default-rtdb.firebaseio.com",
-  projectId: "multiplayer-shooter-53747",
-  storageBucket: "multiplayer-shooter-53747.firebasestorage.app",
-  messagingSenderId: "719008624296",
-  appId: "1:719008624296:web:028f0e6ffa71ce718c1c9d",
-  measurementId: "G-ZXWW37JQ9X"
-};
-firebase.initializeApp(firebaseConfig);
-const db = firebase.database();
-
-// --- Game setup ---
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 
-let id = Math.random().toString(36).slice(2,9);
-let x=320, y=240, dir=0, hp=100;
-let dead = false;
+let ws = new WebSocket("ws://localhost:8080"); // change to your deployed server
+let id = null;
 let players = {};
 let bullets = [];
+
 let keys = {};
+document.addEventListener("keydown", e=>keys[e.key]=true);
+document.addEventListener("keyup", e=>keys[e.key]=false);
 
-document.addEventListener("keydown", e => keys[e.key] = true);
-document.addEventListener("keyup", e => keys[e.key] = false);
-canvas.addEventListener("click", shoot);
-
-// --- Database paths ---
-const lobbyRef = db.ref('lobby');
-const playersRef = lobbyRef.child('players');
-const bulletsRef = lobbyRef.child('bullets');
-
-// --- Add self to lobby ---
-playersRef.child(id).set({x, y, dir, hp});
-playersRef.child(id).onDisconnect().remove(); // remove on leave
-
-// --- Listen for other players ---
-playersRef.on('value', snapshot => {
-  players = snapshot.val() || {};
-  // keep local hp if dead
-  if(dead && players[id]) players[id].hp = 0;
-});
-
-// --- Listen for new bullets ---
-bulletsRef.on('child_added', snapshot => {
-  const b = snapshot.val();
-  b.key = snapshot.key;
-  bullets.push(b);
-});
-
-// --- Shoot function ---
-function shoot(e){
-  if(dead) return;
+canvas.addEventListener("click", e=>{
+  if(!id) return;
+  const p = players[id];
+  if(!p || p.dead) return;
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
-  dir = Math.atan2(my - y, mx - x);
-  const b = {x, y, dx: Math.cos(dir)*300, dy: Math.sin(dir)*300, owner:id};
-  bulletsRef.push(b);
-}
+  const angle = Math.atan2(my - p.y, mx - p.x);
+  const speed = 300;
+  ws.send(JSON.stringify({t:'shoot', x:p.x, y:p.y, dx:Math.cos(angle)*speed, dy:Math.sin(angle)*speed}));
+});
 
-// --- Send local position & health to Firebase ---
-function sendState(){
-  playersRef.child(id).set({x, y, dir, hp});
-}
-
-// --- Game loop ---
-let last = performance.now();
-function loop(now){
-  const dt = (now - last)/1000; last = now;
-  const speed = 150;
-
-  if(!dead){
-    if(keys["w"]) y -= speed*dt;
-    if(keys["s"]) y += speed*dt;
-    if(keys["a"]) x -= speed*dt;
-    if(keys["d"]) x += speed*dt;
+ws.onmessage = e=>{
+  const d = JSON.parse(e.data);
+  if(d.t==='init') id = d.id;
+  if(d.t==='state'){
+    players = d.players;
+    bullets = d.bullets;
   }
+};
 
-  // --- Update bullets ---
-  bullets.forEach((b,i)=>{
-    b.x += b.dx*dt;
-    b.y += b.dy*dt;
-
-    // Only owner applies damage
-    if(b.owner===id){
-      for(const pid in players){
-        const p = players[pid];
-        if(pid===id || !p || p.hp<=0) continue;
-        if(b.x > p.x-10 && b.x < p.x+10 && b.y > p.y-10 && b.y < p.y+10){
-          const newHp = Math.max(p.hp-20,0);
-          playersRef.child(pid).update({hp:newHp});
-          bulletsRef.child(b.key).remove();
-        }
-      }
-    }
-  });
-
-  // Remove bullets offscreen
-  bullets = bullets.filter(b => b.x>0 && b.x<canvas.width && b.y>0 && b.y<canvas.height);
-
-  // --- Check if self died ---
-  if(!dead && hp<=0){
-    dead=true;
-    x= -1000; y=-1000; // hide while dead
-    sendState();
-    setTimeout(()=>{
-      x=canvas.width/2; y=canvas.height/2; hp=100; dead=false;
-      sendState();
-    },3000);
+function loop(dt){
+  if(id && players[id] && !players[id].dead){
+    const p = players[id];
+    const speed = 150;
+    if(keys["w"]) p.y -= speed*dt;
+    if(keys["s"]) p.y += speed*dt;
+    if(keys["a"]) p.x -= speed*dt;
+    if(keys["d"]) p.x += speed*dt;
+    ws.send(JSON.stringify({t:'state', x:p.x, y:p.y}));
   }
-
-  sendState();
   draw();
-  requestAnimationFrame(loop);
+  requestAnimationFrame(()=>loop(1/60));
 }
-requestAnimationFrame(loop);
+requestAnimationFrame(()=>loop(1/60));
 
-// --- Draw function ---
 function draw(){
   ctx.fillStyle="#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
 
-  // draw players
   for(const pid in players){
     const p = players[pid];
-    if(!p || p.hp<=0) continue;
+    if(p.dead) continue;
     ctx.fillStyle = pid===id?"#0ff":"#f77";
     ctx.fillRect(p.x-10,p.y-10,20,20);
-
     // health bar
     ctx.fillStyle="#0f0";
     ctx.fillRect(p.x-10,p.y-15,20*(p.hp/100),3);
   }
 
-  // draw bullets
   ctx.fillStyle="#fff";
-  bullets.forEach(b => ctx.fillRect(b.x-3,b.y-3,6,6));
+  bullets.forEach(b=>ctx.fillRect(b.x-3,b.y-3,6,6));
 
-  statusEl.textContent = `Players: ${Object.keys(players).length} | Your HP: ${players[id]?players[id].hp:hp} ${dead?'(Dead)': ''}`;
+  statusEl.textContent = `Players: ${Object.keys(players).length} | Your HP: ${players[id]?players[id].hp:'-'}`;
 }
 </script>
 </body>
