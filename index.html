@@ -63,15 +63,18 @@ ws.onmessage = (ev) => {
     // Host created room
     room = d.code;
     id = d.id;
-    statusEl.textContent = "Room created! Share the code with a friend";
-    codeInput.value = room; // auto-fill input box
-  } else if(d.t === "joined") {
+    statusEl.textContent = "Room created! Share the code with a friend.";
+    setTimeout(() => codeInput.value = room, 50); // ensure input updates
+  } 
+  else if(d.t === "joined") {
     room = d.code;
     id = d.id;
     statusEl.textContent = "Joined room: " + room;
-  } else if(d.t === "state" || d.t === "bullet" || d.t === "join" || d.t === "leave") {
+  } 
+  else if(d.t === "state" || d.t === "bullet" || d.t === "join" || d.t === "leave") {
     handle(d);
-  } else if(d.t === "error") {
+  } 
+  else if(d.t === "error") {
     statusEl.textContent = "Error: " + d.msg;
   }
 };
